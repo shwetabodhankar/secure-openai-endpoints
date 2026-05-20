@@ -42,31 +42,31 @@ flowchart LR
         U[User]
     end
 
-    subgraph BotChannel["Bot Framework Channel Service (Microsoft-managed)"]
-        BFC[Bot Connector\napi.botframework.com]
+    subgraph BotChannel["Bot Framework Channel Service - Microsoft-managed"]
+        BFC["Bot Connector<br/>api.botframework.com"]
     end
 
-    subgraph Azure["Azure Subscription (Zero Trust)"]
-        BOT[Azure Bot Service\n(Single-tenant, MSI)\nMessaging endpoint → APIM]
+    subgraph Azure["Azure Subscription - Zero Trust"]
+        BOT["Azure Bot Service<br/>Single-tenant, MSI<br/>Messaging endpoint &rarr; APIM"]
         subgraph VNET["VNet 10.20.0.0/16"]
             subgraph SnetAPIM["snet-apim 10.20.1.0/24"]
-                APIM[(API Management\nExternal VNet mode\nvalidate-jwt + RBAC)]
+                APIM[("API Management<br/>External VNet mode<br/>validate-jwt + RBAC")]
             end
             subgraph SnetPE["snet-pep 10.20.2.0/24"]
-                PE[[Private Endpoint\nFoundry / OpenAI]]
+                PE[["Private Endpoint<br/>Foundry / OpenAI"]]
             end
-            DNS[(Private DNS Zones\nopenai / cognitiveservices /\nservices.ai.azure.com)]
+            DNS[("Private DNS Zones<br/>openai / cognitiveservices /<br/>services.ai.azure.com")]
         end
-        FOUNDRY[Azure AI Foundry Account\n+ Project + Prompt Agent\nPublic network = Disabled]
+        FOUNDRY["Azure AI Foundry Account<br/>+ Project + Prompt Agent<br/>Public network = Disabled"]
     end
 
-    U -- 1. Chat message --> BFC
-    BFC -- 2. POST /api/messages\n(Bearer JWT, iss=api.botframework.com) --> BOT
-    BOT -- 3. HTTPS (public) --> APIM
-    APIM -- 4. validate-jwt --> APIM
-    APIM -- 5. Private DNS resolves to PE --> PE
-    PE -- 6. Private link --> FOUNDRY
-    FOUNDRY -- 7. Agent response --> APIM --> BOT --> BFC --> U
+    U -- "1. Chat message" --> BFC
+    BFC -- "2. POST /api/messages<br/>Bearer JWT, iss=api.botframework.com" --> BOT
+    BOT -- "3. HTTPS public" --> APIM
+    APIM -- "4. validate-jwt" --> APIM
+    APIM -- "5. Private DNS resolves to PE" --> PE
+    PE -- "6. Private link" --> FOUNDRY
+    FOUNDRY -- "7. Agent response" --> APIM --> BOT --> BFC --> U
 ```
 
 **Request path**
