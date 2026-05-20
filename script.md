@@ -218,14 +218,38 @@ Walk this through with the customer message-by-message:
 
 ## Section 6 — Zero Trust mapping
 
-| Zero Trust principle | How this architecture enforces it |
-|---|---|
-| **Verify explicitly** | Every request: HTTPS + `validate-jwt` (Bot Framework OIDC, issuer pinned, audience pinned, signature + expiration required) |
-| **Use least privilege** | Roles scoped to the Foundry account only (not RG/sub); single role = "Azure AI User"; no Contributor/Owner anywhere in the runtime path |
-| **Assume breach — network** | `publicNetworkAccess: Disabled` on Foundry; PE is the only data path; NSG denies Internet on `snet-pep` and `snet-jump`; jumpbox has no public IP |
-| **Assume breach — identity** | `disableLocalAuth: true` (no API keys); all auth is Entra ID tokens; Bot is **single-tenant** |
-| **Inspect & log** | `x-correlation-id` injected per request; APIM diagnostic logs + Bot Service activity logs + Foundry telemetry can be wired to Log Analytics |
-| **One ingress** | APIM is the only public surface; everything else (Foundry, jumpbox, PE) is private |
+> **Design stance (validated with the security team):** This is an **identity-first** pattern, not a network-first pattern. The primary control on the public edge is **Bot Framework JWT validation at APIM** — without a valid token issued by `https://api.botframework.com` for an audience matching our bot AppId, requests are rejected before they reach any backend. Network isolation (private endpoint, disabled public access on Foundry, NSGs) is **defense-in-depth layered on top**, not the gate itself. IP allowlisting of Teams/Bot Framework ranges is intentionally **not** used — those ranges are broad, change, and add little once JWT validation is enforced.
+
+### Controls, classified by layer
+
+| Layer | Control | Role |
+|---|---|---|
+| **Authentication (primary)** | APIM `validate-jwt`: issuer = `api.botframework.com`, audiences = our two bot AppIds, signature + expiry checked against Bot Framework OIDC metadata | **Gate** — no valid token, no entry |
+| **Authorization — tenant** | Bot Service is **single-tenant**; only tokens minted in our Entra tenant carry an accepted issuer/audience pairing | Scope |
+| **Authorization — app** | Entra app registration owns the bot; tokens are bound to that AppId | Scope |
+| **Authorization — Teams** | Teams admin app-assignment policies control which users/groups can install/use the app | Scope |
+| **Authorization — backend** | APIM's MSI holds `Azure AI User` on the Foundry account (account-scoped, not RG/sub); used only when injecting MSI tokens for non-JWT paths | Least privilege |
+| **Network (defense-in-depth)** | `publicNetworkAccess=Disabled` on Foundry; private endpoint is the only data path; NSGs deny Internet on `snet-pep`/`snet-jump`; jumpbox has no public IP | Containment if a token check is ever bypassed |
+| **Identity hardening** | `disableLocalAuth=true` — no API keys exist to leak; all auth is Entra tokens | Removes a class of attack |
+| **Observability** | `x-correlation-id` per request; APIM diagnostic logs, Bot Service activity logs, Foundry telemetry → Log Analytics (when wired) | Assume breach — detect |
+| **Single ingress** | APIM is the only public surface; everything else is private | Reduces attack surface |
+
+### Why public APIM is safe here
+The APIM front door has a public IP — that's required because the Microsoft-managed Bot Framework Channel Service is itself a SaaS service and must reach us over the internet. The endpoint being publicly reachable is **not** a vulnerability because:
+1. Every request is rejected unless it carries a Bot Framework-signed JWT for our specific bot.
+2. The backend (Foundry) cannot be reached except via APIM through the private endpoint — there is no public path to Foundry at all.
+3. The Bot resource is single-tenant, so tokens from any other tenant fail audience/issuer validation.
+
+> "Public entry point ≠ open backend." Access is mediated through APIM, token validation, and network isolation — in that order of priority.
+
+### Optional hardening (enterprise pattern)
+Not required for the threat model, but available if a customer's policy demands it:
+- **Internal APIM mode** + **Application Gateway** + **WAF** in front of APIM — adds an L7 inspection layer and removes APIM's own public IP.
+- **NSG restriction** on `snet-apim` inbound to service tag `AzureBotService` only.
+- **Premium APIM** for HA + zone redundancy.
+- **Customer-managed keys** on Foundry.
+
+Trade-off: higher cost and operational complexity, marginal security gain once JWT validation is enforced.
 
 ---
 
