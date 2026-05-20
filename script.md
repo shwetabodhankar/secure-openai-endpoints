@@ -98,12 +98,27 @@ We start with the AI service itself, then progressively wrap network controls ar
 | `AzureBastionSubnet` | `10.20.3.0/26` | Required exact name for Bastion | (Bastion-managed) |
 | `snet-jump` | `10.20.4.0/24` | Jumpbox VM | `nsg-teamsai-jump` — only Bastion may RDP/SSH; Internet denied |
 
+**Why this matters (talking pitch):**
+> Think of the VNet as a *private street* inside Azure. Every Azure resource is either on this street (and reachable by IP) or out on the public internet. By placing APIM and the Private Endpoint NIC on the same VNet, we give APIM a path to Foundry that **never leaves Microsoft's backbone** — no public IP, no internet hop. The subnets aren't cosmetic; each one has a different NSG, so a compromise in one zone (say, the jumpbox subnet) can't pivot to another (the PE subnet) just because they share the VNet.
+
+**In the absence of this:**
+- Without a VNet, APIM and Foundry could only talk over **public IPs**, even if both live in the same subscription. Every request would traverse the internet, exposing both ends to scanning, MITM (mitigated only by TLS), and DDoS.
+- Without subnet segmentation, a foothold on the jumpbox would have direct L3 reach to the Private Endpoint NIC — an attacker could probe Foundry's private IP directly. With subnet NSGs, `snet-jump` cannot reach `snet-pep` on 443.
+
 ### 2.2 Private Endpoint
 - **Resource:** `pe-teamsai-foundry` (`Microsoft.Network/privateEndpoints`)
 - **Group ID:** `account` (the Foundry / Cognitive Services data plane group)
 - **Bound to:** Foundry account `aoai-teamsai-6f3kmfw4v4zri`
 - **Subnet:** `snet-pep`
 - **Defined in:** [infra/modules/privateEndpoint.bicep](infra/modules/privateEndpoint.bicep)
+
+**Why this matters (talking pitch):**
+> A Private Endpoint is a **NIC in your VNet that "is" the PaaS service**. When APIM calls `aoai-teamsai-6f3kmfw4v4zri.services.ai.azure.com`, the TCP connection terminates on this NIC — IP `10.20.2.x` — not on Microsoft's public OpenAI front door. The traffic rides the Azure backbone the whole way; it never sees the internet. Combined with `publicNetworkAccess=Disabled` on the Foundry account itself, **there is literally no public route to our data**. Even if someone knew the FQDN and had a valid token, from outside the VNet the connection would time out.
+
+**In the absence of this:**
+- Foundry would only be reachable via its **public anycast endpoint**. Anyone on the internet who learned the hostname could attempt to authenticate. Compromised keys or stolen tokens become directly exploitable from anywhere in the world.
+- Data exfiltration via DNS or HTTP rebinding becomes feasible — with PE + DNS overrides, those attacks can't even reach a public IP because DNS resolves to RFC1918 space.
+- Compliance regimes that mandate "no internet-exposed data plane" (HIPAA, PCI, many EU sovereignty frameworks) would fail audit.
 
 ### 2.3 Private DNS zones (all linked to the VNet)
 | Zone | Purpose |
@@ -113,6 +128,15 @@ We start with the AI service itself, then progressively wrap network controls ar
 | `privatelink.services.ai.azure.com` | Modern AI Services / Foundry hostname (this is the one APIM resolves at runtime) |
 
 The Private Endpoint's **DNS zone group** auto-creates A records in all three zones, so any client inside the VNet resolves Foundry's FQDNs to the PE's private IP (an address from `10.20.2.0/24`) instead of the public anycast IP.
+
+**Why this matters (talking pitch):**
+> The Private Endpoint gives you a private *IP*, but applications speak *hostnames*. The SDKs, APIM backend config, and Foundry's own redirects all use FQDNs like `aoai-teamsai-6f3kmfw4v4zri.services.ai.azure.com`. Without DNS overrides, those names would resolve to public IPs and your traffic would route over the internet **even though** the Private Endpoint exists. The private DNS zones are the glue: linked to the VNet, they make the VNet's resolver return the PE's private IP for any of the three Foundry hostnames. Three zones because Microsoft has renamed the service over the years and the same account answers to all three — covering every zone future-proofs the design.
+
+**In the absence of this:**
+- The Private Endpoint would still exist but be **bypassed silently** — APIM's outbound DNS lookup would return the public IP, and traffic would flow over the internet to Microsoft's public front end. You'd think you were private; you'd actually be public, and it would only surface during a network outage or audit.
+- This is one of the most common "silent failures" in Azure Private Link deployments — PE created, DNS forgotten, false sense of security for months.
+- If you only linked one of the three zones (say only `openai.azure.com`), a client calling the agent via the newer `services.ai.azure.com` hostname (which is what the Foundry SDK uses today) would resolve publicly and leak the call to the internet.
+
 
 ### 2.4 Jumpbox + Bastion (admin path)
 - **VM:** `vm-jump-teamsai`, Windows Server 2022 Azure Edition, `Standard_DC2s_v3` (Trusted Launch, secure boot, vTPM), **no public IP**, system MSI
