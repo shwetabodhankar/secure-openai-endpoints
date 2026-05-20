@@ -1,0 +1,65 @@
+<!--
+  Global APIM policy
+  ==================
+  Applied to EVERY inbound request on this APIM instance.
+
+  Security goals:
+    1. Force HTTPS.
+    2. Validate the caller is the Microsoft Bot Framework Channel Service via
+       JWT signature against the public OpenID config at
+       https://login.botframework.com/v1/.well-known/openidconfiguration
+       with issuer https://api.botframework.com.
+    3. Audience must equal OUR bot's Microsoft App ID ({{bot-app-id}}).
+    4. Reject everything else with 401.
+
+  Notes:
+    - GLOBAL scope is the root: <base /> is NOT allowed.
+    - Inside <validate-jwt> child order matters:
+        openid-config -> audiences -> issuers -> required-claims
+    - bot-app-id named value is provisioned by infra/modules/apim.bicep.
+-->
+<policies>
+  <inbound>
+    <choose>
+      <when condition="@(context.Request.OriginalUrl.Scheme != &quot;https&quot;)">
+        <return-response>
+          <set-status code="403" reason="HTTPS required" />
+        </return-response>
+      </when>
+    </choose>
+
+    <validate-jwt
+        header-name="Authorization"
+        failed-validation-httpcode="401"
+        failed-validation-error-message="Unauthorized. Valid Bot Framework token required."
+        require-scheme="Bearer"
+        require-signed-tokens="true"
+        require-expiration-time="true"
+        clock-skew="300">
+      <openid-config url="https://login.botframework.com/v1/.well-known/openidconfiguration" />
+      <audiences>
+        <audience>{{bot-app-id}}</audience>
+        <audience>{{foundry-bot-app-id}}</audience>
+      </audiences>
+      <issuers>
+        <issuer>https://api.botframework.com</issuer>
+      </issuers>
+    </validate-jwt>
+
+    <!--
+      Do NOT strip the Authorization header. The upstream Foundry agent
+      activity-protocol endpoint validates the Bot Framework JWT itself
+      (it authenticates the caller as a registered bot by its App ID).
+    -->
+  </inbound>
+
+  <backend />
+
+  <outbound>
+    <set-header name="Server"           exists-action="delete" />
+    <set-header name="X-Powered-By"     exists-action="delete" />
+    <set-header name="X-AspNet-Version" exists-action="delete" />
+  </outbound>
+
+  <on-error />
+</policies>

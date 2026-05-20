@@ -1,0 +1,1524 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.39.26.7824",
+      "templateHash": "13364518040487303809"
+    }
+  },
+  "parameters": {
+    "workload": {
+      "type": "string",
+      "defaultValue": "teamsai",
+      "metadata": {
+        "description": "Short workload name, used to derive resource names."
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Deployment region."
+      }
+    },
+    "suffix": {
+      "type": "string",
+      "defaultValue": "[uniqueString(resourceGroup().id)]",
+      "metadata": {
+        "description": "Random suffix to keep globally-unique names unique."
+      }
+    },
+    "tenantId": {
+      "type": "string",
+      "defaultValue": "[subscription().tenantId]",
+      "metadata": {
+        "description": "Entra ID tenant id that owns the Bot app registration."
+      }
+    },
+    "botAppId": {
+      "type": "string",
+      "metadata": {
+        "description": "App (client) ID of the Entra ID app registration backing the Bot. Must be SINGLE TENANT."
+      }
+    },
+    "apimPublisherEmail": {
+      "type": "string",
+      "metadata": {
+        "description": "Publisher email for APIM."
+      }
+    },
+    "apimPublisherName": {
+      "type": "string",
+      "defaultValue": "Platform Team",
+      "metadata": {
+        "description": "Publisher name for APIM."
+      }
+    },
+    "foundryAccountName": {
+      "type": "string",
+      "defaultValue": "[format('aoai-{0}-{1}', parameters('workload'), parameters('suffix'))]",
+      "metadata": {
+        "description": "Foundry / AI Services account name (must be globally unique)."
+      }
+    },
+    "foundryProjectName": {
+      "type": "string",
+      "defaultValue": "sbodhankar-aveva-demo",
+      "metadata": {
+        "description": "Foundry project name (logical sub-resource within the account)."
+      }
+    },
+    "jumpAdminUsername": {
+      "type": "string",
+      "defaultValue": "azureadmin",
+      "metadata": {
+        "description": "Admin username for the jumpbox VM."
+      }
+    },
+    "jumpAdminPassword": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Admin password for the jumpbox VM. 12+ chars, complexity required."
+      }
+    }
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "network",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "workload": {
+            "value": "[parameters('workload')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.39.26.7824",
+              "templateHash": "2611493684328795518"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Region."
+              }
+            },
+            "workload": {
+              "type": "string",
+              "metadata": {
+                "description": "Workload short name."
+              }
+            },
+            "vnetAddressSpace": {
+              "type": "string",
+              "defaultValue": "10.20.0.0/16",
+              "metadata": {
+                "description": "VNet address space."
+              }
+            },
+            "apimSubnetPrefix": {
+              "type": "string",
+              "defaultValue": "10.20.1.0/24",
+              "metadata": {
+                "description": "APIM subnet prefix (External VNet mode requires a dedicated subnet)."
+              }
+            },
+            "peSubnetPrefix": {
+              "type": "string",
+              "defaultValue": "10.20.2.0/24",
+              "metadata": {
+                "description": "Private Endpoint subnet prefix."
+              }
+            },
+            "bastionSubnetPrefix": {
+              "type": "string",
+              "defaultValue": "10.20.3.0/26",
+              "metadata": {
+                "description": "Azure Bastion subnet prefix. MUST be /26 or larger and named AzureBastionSubnet."
+              }
+            },
+            "jumpSubnetPrefix": {
+              "type": "string",
+              "defaultValue": "10.20.4.0/24",
+              "metadata": {
+                "description": "Jumpbox VM subnet prefix."
+              }
+            }
+          },
+          "variables": {
+            "dnsZoneNames": [
+              "privatelink.openai.azure.com",
+              "privatelink.cognitiveservices.azure.com",
+              "privatelink.services.ai.azure.com"
+            ]
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Network/networkSecurityGroups",
+              "apiVersion": "2023-11-01",
+              "name": "[format('nsg-{0}-apim', parameters('workload'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "securityRules": [
+                  {
+                    "name": "Allow-APIM-Management",
+                    "properties": {
+                      "priority": 100,
+                      "direction": "Inbound",
+                      "access": "Allow",
+                      "protocol": "Tcp",
+                      "sourceAddressPrefix": "ApiManagement",
+                      "sourcePortRange": "*",
+                      "destinationAddressPrefix": "VirtualNetwork",
+                      "destinationPortRange": "3443"
+                    }
+                  },
+                  {
+                    "name": "Allow-AzureLoadBalancer",
+                    "properties": {
+                      "priority": 110,
+                      "direction": "Inbound",
+                      "access": "Allow",
+                      "protocol": "*",
+                      "sourceAddressPrefix": "AzureLoadBalancer",
+                      "sourcePortRange": "*",
+                      "destinationAddressPrefix": "*",
+                      "destinationPortRange": "6390"
+                    }
+                  },
+                  {
+                    "name": "Allow-Internet-Https-In",
+                    "properties": {
+                      "priority": 120,
+                      "direction": "Inbound",
+                      "access": "Allow",
+                      "protocol": "Tcp",
+                      "sourceAddressPrefix": "Internet",
+                      "sourcePortRange": "*",
+                      "destinationAddressPrefix": "VirtualNetwork",
+                      "destinationPortRange": "443"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Network/networkSecurityGroups",
+              "apiVersion": "2023-11-01",
+              "name": "[format('nsg-{0}-pe', parameters('workload'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "securityRules": [
+                  {
+                    "name": "Allow-VNet-Https-In",
+                    "properties": {
+                      "priority": 100,
+                      "direction": "Inbound",
+                      "access": "Allow",
+                      "protocol": "Tcp",
+                      "sourceAddressPrefix": "VirtualNetwork",
+                      "sourcePortRange": "*",
+                      "destinationAddressPrefix": "VirtualNetwork",
+                      "destinationPortRange": "443"
+                    }
+                  },
+                  {
+                    "name": "Deny-Internet-In",
+                    "properties": {
+                      "priority": 4096,
+                      "direction": "Inbound",
+                      "access": "Deny",
+                      "protocol": "*",
+                      "sourceAddressPrefix": "Internet",
+                      "sourcePortRange": "*",
+                      "destinationAddressPrefix": "*",
+                      "destinationPortRange": "*"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Network/networkSecurityGroups",
+              "apiVersion": "2023-11-01",
+              "name": "[format('nsg-{0}-jump', parameters('workload'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "securityRules": [
+                  {
+                    "name": "Allow-Bastion-RDP",
+                    "properties": {
+                      "priority": 100,
+                      "direction": "Inbound",
+                      "access": "Allow",
+                      "protocol": "Tcp",
+                      "sourceAddressPrefix": "VirtualNetwork",
+                      "sourcePortRange": "*",
+                      "destinationAddressPrefix": "VirtualNetwork",
+                      "destinationPortRanges": [
+                        "3389",
+                        "22"
+                      ]
+                    }
+                  },
+                  {
+                    "name": "Deny-Internet-In",
+                    "properties": {
+                      "priority": 4096,
+                      "direction": "Inbound",
+                      "access": "Deny",
+                      "protocol": "*",
+                      "sourceAddressPrefix": "Internet",
+                      "sourcePortRange": "*",
+                      "destinationAddressPrefix": "*",
+                      "destinationPortRange": "*"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Network/virtualNetworks",
+              "apiVersion": "2023-11-01",
+              "name": "[format('vnet-{0}', parameters('workload'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "addressSpace": {
+                  "addressPrefixes": [
+                    "[parameters('vnetAddressSpace')]"
+                  ]
+                },
+                "subnets": [
+                  {
+                    "name": "snet-apim",
+                    "properties": {
+                      "addressPrefix": "[parameters('apimSubnetPrefix')]",
+                      "networkSecurityGroup": {
+                        "id": "[resourceId('Microsoft.Network/networkSecurityGroups', format('nsg-{0}-apim', parameters('workload')))]"
+                      },
+                      "serviceEndpoints": [
+                        {
+                          "service": "Microsoft.Storage"
+                        },
+                        {
+                          "service": "Microsoft.KeyVault"
+                        }
+                      ]
+                    }
+                  },
+                  {
+                    "name": "snet-pep",
+                    "properties": {
+                      "addressPrefix": "[parameters('peSubnetPrefix')]",
+                      "networkSecurityGroup": {
+                        "id": "[resourceId('Microsoft.Network/networkSecurityGroups', format('nsg-{0}-pe', parameters('workload')))]"
+                      },
+                      "privateEndpointNetworkPolicies": "Disabled"
+                    }
+                  },
+                  {
+                    "name": "AzureBastionSubnet",
+                    "properties": {
+                      "addressPrefix": "[parameters('bastionSubnetPrefix')]"
+                    }
+                  },
+                  {
+                    "name": "snet-jump",
+                    "properties": {
+                      "addressPrefix": "[parameters('jumpSubnetPrefix')]",
+                      "networkSecurityGroup": {
+                        "id": "[resourceId('Microsoft.Network/networkSecurityGroups', format('nsg-{0}-jump', parameters('workload')))]"
+                      }
+                    }
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/networkSecurityGroups', format('nsg-{0}-apim', parameters('workload')))]",
+                "[resourceId('Microsoft.Network/networkSecurityGroups', format('nsg-{0}-jump', parameters('workload')))]",
+                "[resourceId('Microsoft.Network/networkSecurityGroups', format('nsg-{0}-pe', parameters('workload')))]"
+              ]
+            },
+            {
+              "copy": {
+                "name": "zones",
+                "count": "[length(variables('dnsZoneNames'))]"
+              },
+              "type": "Microsoft.Network/privateDnsZones",
+              "apiVersion": "2024-06-01",
+              "name": "[variables('dnsZoneNames')[copyIndex()]]",
+              "location": "global"
+            },
+            {
+              "copy": {
+                "name": "zoneLinks",
+                "count": "[length(variables('dnsZoneNames'))]"
+              },
+              "type": "Microsoft.Network/privateDnsZones/virtualNetworkLinks",
+              "apiVersion": "2024-06-01",
+              "name": "[format('{0}/{1}', variables('dnsZoneNames')[copyIndex()], format('link-{0}', parameters('workload')))]",
+              "location": "global",
+              "properties": {
+                "registrationEnabled": false,
+                "virtualNetwork": {
+                  "id": "[resourceId('Microsoft.Network/virtualNetworks', format('vnet-{0}', parameters('workload')))]"
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/virtualNetworks', format('vnet-{0}', parameters('workload')))]",
+                "[resourceId('Microsoft.Network/privateDnsZones', variables('dnsZoneNames')[copyIndex()])]"
+              ]
+            }
+          ],
+          "outputs": {
+            "vnetId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/virtualNetworks', format('vnet-{0}', parameters('workload')))]"
+            },
+            "apimSubnetId": {
+              "type": "string",
+              "value": "[format('{0}/subnets/snet-apim', resourceId('Microsoft.Network/virtualNetworks', format('vnet-{0}', parameters('workload'))))]"
+            },
+            "peSubnetId": {
+              "type": "string",
+              "value": "[format('{0}/subnets/snet-pep', resourceId('Microsoft.Network/virtualNetworks', format('vnet-{0}', parameters('workload'))))]"
+            },
+            "bastionSubnetId": {
+              "type": "string",
+              "value": "[format('{0}/subnets/AzureBastionSubnet', resourceId('Microsoft.Network/virtualNetworks', format('vnet-{0}', parameters('workload'))))]"
+            },
+            "jumpSubnetId": {
+              "type": "string",
+              "value": "[format('{0}/subnets/snet-jump', resourceId('Microsoft.Network/virtualNetworks', format('vnet-{0}', parameters('workload'))))]"
+            },
+            "openaiDnsZoneId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/privateDnsZones', variables('dnsZoneNames')[0])]"
+            },
+            "cognitiveServicesDnsZoneId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/privateDnsZones', variables('dnsZoneNames')[1])]"
+            },
+            "aiServicesDnsZoneId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/privateDnsZones', variables('dnsZoneNames')[2])]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "foundry",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "accountName": {
+            "value": "[parameters('foundryAccountName')]"
+          },
+          "projectName": {
+            "value": "[parameters('foundryProjectName')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.39.26.7824",
+              "templateHash": "15934168771466499730"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Region."
+              }
+            },
+            "accountName": {
+              "type": "string",
+              "metadata": {
+                "description": "Foundry / AI Services account name."
+              }
+            },
+            "projectName": {
+              "type": "string",
+              "metadata": {
+                "description": "Foundry project name."
+              }
+            },
+            "sku": {
+              "type": "string",
+              "defaultValue": "S0",
+              "metadata": {
+                "description": "SKU for the AI Services account."
+              }
+            },
+            "modelDeploymentName": {
+              "type": "string",
+              "defaultValue": "gpt-4o",
+              "metadata": {
+                "description": "Model deployment name (referenced by the agent)."
+              }
+            },
+            "modelName": {
+              "type": "string",
+              "defaultValue": "gpt-4o",
+              "metadata": {
+                "description": "Underlying model name to deploy."
+              }
+            },
+            "modelVersion": {
+              "type": "string",
+              "defaultValue": "2024-11-20",
+              "metadata": {
+                "description": "Model version. Use a version GA in your region."
+              }
+            },
+            "modelCapacity": {
+              "type": "int",
+              "defaultValue": 10,
+              "metadata": {
+                "description": "Tokens-per-minute capacity (thousands). 10 = 10K TPM."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.CognitiveServices/accounts",
+              "apiVersion": "2025-04-01-preview",
+              "name": "[parameters('accountName')]",
+              "location": "[parameters('location')]",
+              "kind": "AIServices",
+              "sku": {
+                "name": "[parameters('sku')]"
+              },
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "disableLocalAuth": true,
+                "allowProjectManagement": true,
+                "publicNetworkAccess": "Disabled",
+                "customSubDomainName": "[parameters('accountName')]",
+                "networkAcls": {
+                  "defaultAction": "Deny"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.CognitiveServices/accounts/projects",
+              "apiVersion": "2025-04-01-preview",
+              "name": "[format('{0}/{1}', parameters('accountName'), parameters('projectName'))]",
+              "location": "[parameters('location')]",
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {},
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', parameters('accountName'))]"
+              ]
+            },
+            {
+              "type": "Microsoft.CognitiveServices/accounts/deployments",
+              "apiVersion": "2025-04-01-preview",
+              "name": "[format('{0}/{1}', parameters('accountName'), parameters('modelDeploymentName'))]",
+              "sku": {
+                "name": "GlobalStandard",
+                "capacity": "[parameters('modelCapacity')]"
+              },
+              "properties": {
+                "model": {
+                  "format": "OpenAI",
+                  "name": "[parameters('modelName')]",
+                  "version": "[parameters('modelVersion')]"
+                },
+                "raiPolicyName": "Microsoft.DefaultV2"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.CognitiveServices/accounts', parameters('accountName'))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "accountId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.CognitiveServices/accounts', parameters('accountName'))]"
+            },
+            "accountName": {
+              "type": "string",
+              "value": "[parameters('accountName')]"
+            },
+            "endpoint": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.CognitiveServices/accounts', parameters('accountName')), '2025-04-01-preview').endpoint]"
+            },
+            "projectId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.CognitiveServices/accounts/projects', parameters('accountName'), parameters('projectName'))]"
+            },
+            "projectName": {
+              "type": "string",
+              "value": "[parameters('projectName')]"
+            },
+            "modelDeploymentName": {
+              "type": "string",
+              "value": "[parameters('modelDeploymentName')]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "foundry-pe",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "workload": {
+            "value": "[parameters('workload')]"
+          },
+          "foundryAccountId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'foundry'), '2025-04-01').outputs.accountId.value]"
+          },
+          "subnetId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'network'), '2025-04-01').outputs.peSubnetId.value]"
+          },
+          "privateDnsZoneIds": {
+            "value": [
+              "[reference(resourceId('Microsoft.Resources/deployments', 'network'), '2025-04-01').outputs.openaiDnsZoneId.value]",
+              "[reference(resourceId('Microsoft.Resources/deployments', 'network'), '2025-04-01').outputs.cognitiveServicesDnsZoneId.value]",
+              "[reference(resourceId('Microsoft.Resources/deployments', 'network'), '2025-04-01').outputs.aiServicesDnsZoneId.value]"
+            ]
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.39.26.7824",
+              "templateHash": "15429742565942063286"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Region."
+              }
+            },
+            "workload": {
+              "type": "string",
+              "metadata": {
+                "description": "Workload short name."
+              }
+            },
+            "foundryAccountId": {
+              "type": "string",
+              "metadata": {
+                "description": "Foundry / AI Services account resource id."
+              }
+            },
+            "subnetId": {
+              "type": "string",
+              "metadata": {
+                "description": "Subnet id where the PE NIC will be attached."
+              }
+            },
+            "privateDnsZoneIds": {
+              "type": "array",
+              "metadata": {
+                "description": "Private DNS zone ids to bind to the PE (openai, cognitiveservices, services.ai.azure.com)."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Network/privateEndpoints",
+              "apiVersion": "2023-11-01",
+              "name": "[format('pe-{0}-foundry', parameters('workload'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "subnet": {
+                  "id": "[parameters('subnetId')]"
+                },
+                "privateLinkServiceConnections": [
+                  {
+                    "name": "foundry-plsc",
+                    "properties": {
+                      "privateLinkServiceId": "[parameters('foundryAccountId')]",
+                      "groupIds": [
+                        "account"
+                      ]
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Network/privateEndpoints/privateDnsZoneGroups",
+              "apiVersion": "2023-11-01",
+              "name": "[format('{0}/{1}', format('pe-{0}-foundry', parameters('workload')), 'default')]",
+              "properties": {
+                "copy": [
+                  {
+                    "name": "privateDnsZoneConfigs",
+                    "count": "[length(parameters('privateDnsZoneIds'))]",
+                    "input": {
+                      "name": "[format('config-{0}', copyIndex('privateDnsZoneConfigs'))]",
+                      "properties": {
+                        "privateDnsZoneId": "[parameters('privateDnsZoneIds')[copyIndex('privateDnsZoneConfigs')]]"
+                      }
+                    }
+                  }
+                ]
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/privateEndpoints', format('pe-{0}-foundry', parameters('workload')))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "privateEndpointId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.Network/privateEndpoints', format('pe-{0}-foundry', parameters('workload')))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'foundry')]",
+        "[resourceId('Microsoft.Resources/deployments', 'network')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "apim",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "workload": {
+            "value": "[parameters('workload')]"
+          },
+          "suffix": {
+            "value": "[parameters('suffix')]"
+          },
+          "apimSubnetId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'network'), '2025-04-01').outputs.apimSubnetId.value]"
+          },
+          "publisherEmail": {
+            "value": "[parameters('apimPublisherEmail')]"
+          },
+          "publisherName": {
+            "value": "[parameters('apimPublisherName')]"
+          },
+          "botAppId": {
+            "value": "[parameters('botAppId')]"
+          },
+          "tenantId": {
+            "value": "[parameters('tenantId')]"
+          },
+          "foundryEndpoint": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'foundry'), '2025-04-01').outputs.endpoint.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.39.26.7824",
+              "templateHash": "4212111056280204290"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Region."
+              }
+            },
+            "workload": {
+              "type": "string",
+              "metadata": {
+                "description": "Workload short name."
+              }
+            },
+            "suffix": {
+              "type": "string",
+              "metadata": {
+                "description": "Suffix to keep the APIM name globally unique."
+              }
+            },
+            "apimSubnetId": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource id of the subnet APIM will be injected into."
+              }
+            },
+            "publisherEmail": {
+              "type": "string",
+              "metadata": {
+                "description": "Publisher email shown in the developer portal."
+              }
+            },
+            "publisherName": {
+              "type": "string",
+              "metadata": {
+                "description": "Publisher name shown in the developer portal."
+              }
+            },
+            "botAppId": {
+              "type": "string",
+              "metadata": {
+                "description": "App (client) ID of the Bot — used as the JWT audience claim."
+              }
+            },
+            "tenantId": {
+              "type": "string",
+              "metadata": {
+                "description": "Entra ID tenant id."
+              }
+            },
+            "foundryEndpoint": {
+              "type": "string",
+              "metadata": {
+                "description": "Backend Foundry endpoint, e.g. https://aoai-xxx.openai.azure.com"
+              }
+            },
+            "skuName": {
+              "type": "string",
+              "defaultValue": "Developer",
+              "allowedValues": [
+                "Developer",
+                "Premium"
+              ],
+              "metadata": {
+                "description": "SKU. Developer = non-prod, Premium = prod (only Premium supports VNet injection in production)."
+              }
+            },
+            "skuCapacity": {
+              "type": "int",
+              "defaultValue": 1,
+              "metadata": {
+                "description": "SKU capacity (units)."
+              }
+            }
+          },
+          "variables": {
+            "$fxv#0": "<!--\r\n  Global APIM policy\r\n  ==================\r\n  Applied to EVERY inbound request on this APIM instance.\r\n\r\n  Security goals:\r\n    1. Force HTTPS (enforced at the listener too, but defense-in-depth).\r\n    2. Validate that the caller is the Microsoft Bot Framework Channel Service\r\n       by checking the JWT signature against the public OpenID configuration\r\n       at https://login.botframework.com/v1/.well-known/openidconfiguration\r\n       and the issuer https://api.botframework.com.\r\n    3. Validate the audience claim equals OUR bot's Microsoft App ID (the\r\n       {{bot-app-id}} named value), so a token issued to a different bot\r\n       cannot be replayed against us.\r\n    4. Reject everything else with 401.\r\n\r\n  Notes:\r\n    - The bot-app-id named value is provisioned by infra/modules/apim.bicep.\r\n    - require-scheme is case-sensitive on the header NAME but not VALUE.\r\n    - We do NOT trust the X-Forwarded-For or Host headers — APIM strips/normalizes\r\n      them; backend authorization is done with APIM's MSI, not the caller token.\r\n-->\r\n<policies>\r\n  <inbound>\r\n    <base />\r\n\r\n    <!-- 1. Defense-in-depth: only HTTPS. -->\r\n    <choose>\r\n      <when condition=\"@(context.Request.OriginalUrl.Scheme != \"https\")\">\r\n        <return-response>\r\n          <set-status code=\"403\" reason=\"HTTPS required\" />\r\n        </return-response>\r\n      </when>\r\n    </choose>\r\n\r\n    <!-- 2 + 3. Validate the Bot Framework JWT. -->\r\n    <validate-jwt\r\n        header-name=\"Authorization\"\r\n        failed-validation-httpcode=\"401\"\r\n        failed-validation-error-message=\"Unauthorized. Valid Bot Framework token required.\"\r\n        require-scheme=\"Bearer\"\r\n        require-signed-tokens=\"true\"\r\n        require-expiration-time=\"true\"\r\n        clock-skew=\"300\">\r\n      <openid-config url=\"https://login.botframework.com/v1/.well-known/openidconfiguration\" />\r\n      <issuers>\r\n        <issuer>https://api.botframework.com</issuer>\r\n      </issuers>\r\n      <audiences>\r\n        <!-- Must equal the Bot's Microsoft App ID. Replay protection. -->\r\n        <audience>{{bot-app-id}}</audience>\r\n      </audiences>\r\n      <required-claims>\r\n        <claim name=\"aud\" match=\"all\">\r\n          <value>{{bot-app-id}}</value>\r\n        </claim>\r\n      </required-claims>\r\n    </validate-jwt>\r\n\r\n    <!-- 4. Strip the inbound bearer so it never leaks to the backend. -->\r\n    <set-header name=\"Authorization\" exists-action=\"delete\" />\r\n  </inbound>\r\n\r\n  <backend>\r\n    <base />\r\n  </backend>\r\n\r\n  <outbound>\r\n    <base />\r\n    <!-- Remove server fingerprinting. -->\r\n    <set-header name=\"Server\"            exists-action=\"delete\" />\r\n    <set-header name=\"X-Powered-By\"      exists-action=\"delete\" />\r\n    <set-header name=\"X-AspNet-Version\"  exists-action=\"delete\" />\r\n  </outbound>\r\n\r\n  <on-error>\r\n    <base />\r\n  </on-error>\r\n</policies>\r\n",
+            "$fxv#1": "<!--\r\n  Per-API policy: bot-agent\r\n  =========================\r\n  Applied to the \"bot-agent\" API. Runs AFTER the global validate-jwt has accepted\r\n  the request. Responsibilities:\r\n\r\n    1. Rewrite the inbound /bot/api/messages call into the Foundry agent\r\n       inference URL (kept here as a single rewrite-uri so you can swap in\r\n       a richer transform later — e.g. extract the user utterance from the\r\n       Bot Framework Activity and POST it to the agent's /chat/completions\r\n       endpoint).\r\n\r\n    2. Acquire an AAD access token for Cognitive Services using APIM's\r\n       system-assigned managed identity (resource =\r\n       https://cognitiveservices.azure.com/) and forward it as the Bearer\r\n       to the backend. NO API KEYS in policy or config.\r\n\r\n    3. Use the named backend \"foundry-private\", whose URL is the private\r\n       Foundry endpoint. Because the VNet has Private DNS linked, the\r\n       hostname resolves to the Private Endpoint IP — traffic never leaves\r\n       the VNet.\r\n\r\n    4. Add a correlation id for traceability.\r\n-->\r\n<policies>\r\n  <inbound>\r\n    <base />\r\n\r\n    <!-- Tag every request for cross-service correlation in App Insights. -->\r\n    <set-variable name=\"correlationId\" value=\"@(Guid.NewGuid().ToString())\" />\r\n    <set-header name=\"x-correlation-id\" exists-action=\"override\">\r\n      <value>@((string)context.Variables[\"correlationId\"])</value>\r\n    </set-header>\r\n\r\n    <!-- Route to the private Foundry backend (Private Endpoint via Private DNS). -->\r\n    <set-backend-service backend-id=\"foundry-private\" />\r\n\r\n    <!--\r\n      Acquire an AAD token using APIM's MSI and inject it as the backend\r\n      Authorization header. Resource = cognitiveservices.azure.com.\r\n      RBAC: APIM's MSI must have the \"Azure AI User\" role on the Foundry\r\n      account (granted in infra/modules/rbac.bicep).\r\n    -->\r\n    <authentication-managed-identity\r\n        resource=\"https://cognitiveservices.azure.com/\"\r\n        output-token-variable-name=\"aadToken\" />\r\n    <set-header name=\"Authorization\" exists-action=\"override\">\r\n      <value>@(\"Bearer \" + (string)context.Variables[\"aadToken\"])</value>\r\n    </set-header>\r\n\r\n    <!--\r\n      Rewrite the path. The Bot Framework will POST /api/messages here;\r\n      forward it to the project's agent endpoint. Adjust to your specific\r\n      agent route (e.g. /openai/threads/runs or the agents preview API).\r\n    -->\r\n    <rewrite-uri template=\"/api/projects/sbodhankar-aveva-demo/agents/messages\" />\r\n  </inbound>\r\n\r\n  <backend>\r\n    <!-- Short, explicit timeout — fail fast instead of holding sockets. -->\r\n    <forward-request timeout=\"60\" buffer-request-body=\"true\" />\r\n  </backend>\r\n\r\n  <outbound>\r\n    <base />\r\n    <set-header name=\"x-correlation-id\" exists-action=\"override\">\r\n      <value>@((string)context.Variables[\"correlationId\"])</value>\r\n    </set-header>\r\n  </outbound>\r\n\r\n  <on-error>\r\n    <base />\r\n    <set-header name=\"x-correlation-id\" exists-action=\"override\">\r\n      <value>@((string)context.Variables[\"correlationId\"])</value>\r\n    </set-header>\r\n  </on-error>\r\n</policies>\r\n"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.ApiManagement/service",
+              "apiVersion": "2024-05-01",
+              "name": "[format('apim-{0}-{1}', parameters('workload'), parameters('suffix'))]",
+              "location": "[parameters('location')]",
+              "sku": {
+                "name": "[parameters('skuName')]",
+                "capacity": "[parameters('skuCapacity')]"
+              },
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "publisherEmail": "[parameters('publisherEmail')]",
+                "publisherName": "[parameters('publisherName')]",
+                "virtualNetworkType": "External",
+                "virtualNetworkConfiguration": {
+                  "subnetResourceId": "[parameters('apimSubnetId')]"
+                }
+              }
+            },
+            {
+              "type": "Microsoft.ApiManagement/service/policies",
+              "apiVersion": "2024-05-01",
+              "name": "[format('{0}/{1}', format('apim-{0}-{1}', parameters('workload'), parameters('suffix')), 'policy')]",
+              "properties": {
+                "format": "rawxml",
+                "value": "[variables('$fxv#0')]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service', format('apim-{0}-{1}', parameters('workload'), parameters('suffix')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.ApiManagement/service/namedValues",
+              "apiVersion": "2024-05-01",
+              "name": "[format('{0}/{1}', format('apim-{0}-{1}', parameters('workload'), parameters('suffix')), 'bot-app-id')]",
+              "properties": {
+                "displayName": "bot-app-id",
+                "value": "[parameters('botAppId')]",
+                "secret": false
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service', format('apim-{0}-{1}', parameters('workload'), parameters('suffix')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.ApiManagement/service/namedValues",
+              "apiVersion": "2024-05-01",
+              "name": "[format('{0}/{1}', format('apim-{0}-{1}', parameters('workload'), parameters('suffix')), 'tenant-id')]",
+              "properties": {
+                "displayName": "tenant-id",
+                "value": "[parameters('tenantId')]",
+                "secret": false
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service', format('apim-{0}-{1}', parameters('workload'), parameters('suffix')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.ApiManagement/service/backends",
+              "apiVersion": "2024-05-01",
+              "name": "[format('{0}/{1}', format('apim-{0}-{1}', parameters('workload'), parameters('suffix')), 'foundry-private')]",
+              "properties": {
+                "protocol": "http",
+                "url": "[parameters('foundryEndpoint')]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service', format('apim-{0}-{1}', parameters('workload'), parameters('suffix')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.ApiManagement/service/apis",
+              "apiVersion": "2024-05-01",
+              "name": "[format('{0}/{1}', format('apim-{0}-{1}', parameters('workload'), parameters('suffix')), 'bot-agent')]",
+              "properties": {
+                "displayName": "Bot → Foundry Agent",
+                "path": "bot",
+                "protocols": [
+                  "https"
+                ],
+                "subscriptionRequired": false,
+                "serviceUrl": "[parameters('foundryEndpoint')]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service', format('apim-{0}-{1}', parameters('workload'), parameters('suffix')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.ApiManagement/service/apis/policies",
+              "apiVersion": "2024-05-01",
+              "name": "[format('{0}/{1}/{2}', format('apim-{0}-{1}', parameters('workload'), parameters('suffix')), 'bot-agent', 'policy')]",
+              "properties": {
+                "format": "rawxml",
+                "value": "[variables('$fxv#1')]"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service/apis', format('apim-{0}-{1}', parameters('workload'), parameters('suffix')), 'bot-agent')]",
+                "[resourceId('Microsoft.ApiManagement/service/backends', format('apim-{0}-{1}', parameters('workload'), parameters('suffix')), 'foundry-private')]",
+                "[resourceId('Microsoft.ApiManagement/service/namedValues', format('apim-{0}-{1}', parameters('workload'), parameters('suffix')), 'bot-app-id')]"
+              ]
+            },
+            {
+              "type": "Microsoft.ApiManagement/service/apis/operations",
+              "apiVersion": "2024-05-01",
+              "name": "[format('{0}/{1}/{2}', format('apim-{0}-{1}', parameters('workload'), parameters('suffix')), 'bot-agent', 'post-messages')]",
+              "properties": {
+                "displayName": "POST /api/messages",
+                "method": "POST",
+                "urlTemplate": "/api/messages"
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.ApiManagement/service/apis', format('apim-{0}-{1}', parameters('workload'), parameters('suffix')), 'bot-agent')]"
+              ]
+            }
+          ],
+          "outputs": {
+            "apimHostname": {
+              "type": "string",
+              "value": "[format('{0}.azure-api.net', format('apim-{0}-{1}', parameters('workload'), parameters('suffix')))]"
+            },
+            "principalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.ApiManagement/service', format('apim-{0}-{1}', parameters('workload'), parameters('suffix'))), '2024-05-01', 'full').identity.principalId]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'foundry')]",
+        "[resourceId('Microsoft.Resources/deployments', 'network')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "bot",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "global"
+          },
+          "workload": {
+            "value": "[parameters('workload')]"
+          },
+          "suffix": {
+            "value": "[parameters('suffix')]"
+          },
+          "tenantId": {
+            "value": "[parameters('tenantId')]"
+          },
+          "botAppId": {
+            "value": "[parameters('botAppId')]"
+          },
+          "messagingEndpoint": {
+            "value": "[format('https://{0}/bot/api/messages', reference(resourceId('Microsoft.Resources/deployments', 'apim'), '2025-04-01').outputs.apimHostname.value)]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.39.26.7824",
+              "templateHash": "16451539476070335654"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "defaultValue": "global",
+              "metadata": {
+                "description": "Bot Service is a global resource."
+              }
+            },
+            "workload": {
+              "type": "string",
+              "metadata": {
+                "description": "Workload short name."
+              }
+            },
+            "suffix": {
+              "type": "string",
+              "metadata": {
+                "description": "Suffix to keep the name unique."
+              }
+            },
+            "tenantId": {
+              "type": "string",
+              "metadata": {
+                "description": "Entra ID tenant id (single-tenant bot)."
+              }
+            },
+            "botAppId": {
+              "type": "string",
+              "metadata": {
+                "description": "App (client) ID of the Entra ID app registration backing the Bot."
+              }
+            },
+            "messagingEndpoint": {
+              "type": "string",
+              "metadata": {
+                "description": "Messaging endpoint — must be the APIM URL, not the AI service."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.BotService/botServices",
+              "apiVersion": "2022-09-15",
+              "name": "[format('bot-{0}-{1}', parameters('workload'), parameters('suffix'))]",
+              "location": "[parameters('location')]",
+              "kind": "azurebot",
+              "sku": {
+                "name": "S1"
+              },
+              "properties": {
+                "displayName": "Travel Agent (Teams)",
+                "endpoint": "[parameters('messagingEndpoint')]",
+                "msaAppId": "[parameters('botAppId')]",
+                "msaAppType": "SingleTenant",
+                "msaAppTenantId": "[parameters('tenantId')]",
+                "publicNetworkAccess": "Enabled",
+                "disableLocalAuth": false
+              }
+            },
+            {
+              "type": "Microsoft.BotService/botServices/channels",
+              "apiVersion": "2022-09-15",
+              "name": "[format('{0}/{1}', format('bot-{0}-{1}', parameters('workload'), parameters('suffix')), 'MsTeamsChannel')]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "channelName": "MsTeamsChannel",
+                "properties": {
+                  "isEnabled": true
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.BotService/botServices', format('bot-{0}-{1}', parameters('workload'), parameters('suffix')))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "botName": {
+              "type": "string",
+              "value": "[format('bot-{0}-{1}', parameters('workload'), parameters('suffix'))]"
+            },
+            "botId": {
+              "type": "string",
+              "value": "[resourceId('Microsoft.BotService/botServices', format('bot-{0}-{1}', parameters('workload'), parameters('suffix')))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'apim')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "rbac",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "foundryAccountName": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'foundry'), '2025-04-01').outputs.accountName.value]"
+          },
+          "principalId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'apim'), '2025-04-01').outputs.principalId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.39.26.7824",
+              "templateHash": "8162902724681418473"
+            }
+          },
+          "parameters": {
+            "foundryAccountName": {
+              "type": "string",
+              "metadata": {
+                "description": "Existing Foundry / AI Services account name (parent scope)."
+              }
+            },
+            "principalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal id of APIMs system-assigned managed identity."
+              }
+            }
+          },
+          "variables": {
+            "azureAiUserRoleId": "53ca6127-db72-4b80-b1b0-d745d6d5456d"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[format('Microsoft.CognitiveServices/accounts/{0}', parameters('foundryAccountName'))]",
+              "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', parameters('foundryAccountName')), parameters('principalId'), variables('azureAiUserRoleId'))]",
+              "properties": {
+                "principalId": "[parameters('principalId')]",
+                "principalType": "ServicePrincipal",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('azureAiUserRoleId'))]"
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'apim')]",
+        "[resourceId('Microsoft.Resources/deployments', 'foundry')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "jumpbox",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "location": {
+            "value": "[parameters('location')]"
+          },
+          "workload": {
+            "value": "[parameters('workload')]"
+          },
+          "suffix": {
+            "value": "[parameters('suffix')]"
+          },
+          "bastionSubnetId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'network'), '2025-04-01').outputs.bastionSubnetId.value]"
+          },
+          "jumpSubnetId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'network'), '2025-04-01').outputs.jumpSubnetId.value]"
+          },
+          "adminUsername": {
+            "value": "[parameters('jumpAdminUsername')]"
+          },
+          "adminPassword": {
+            "value": "[parameters('jumpAdminPassword')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.39.26.7824",
+              "templateHash": "6695377801964923459"
+            }
+          },
+          "parameters": {
+            "location": {
+              "type": "string",
+              "metadata": {
+                "description": "Region."
+              }
+            },
+            "workload": {
+              "type": "string",
+              "metadata": {
+                "description": "Workload short name."
+              }
+            },
+            "suffix": {
+              "type": "string",
+              "metadata": {
+                "description": "Suffix for global-uniqueness."
+              }
+            },
+            "bastionSubnetId": {
+              "type": "string",
+              "metadata": {
+                "description": "Bastion subnet resource id (must be AzureBastionSubnet)."
+              }
+            },
+            "jumpSubnetId": {
+              "type": "string",
+              "metadata": {
+                "description": "Jumpbox subnet resource id."
+              }
+            },
+            "adminUsername": {
+              "type": "string",
+              "defaultValue": "azureadmin",
+              "metadata": {
+                "description": "VM admin username."
+              }
+            },
+            "adminPassword": {
+              "type": "securestring",
+              "metadata": {
+                "description": "VM admin password. 12+ chars, complexity required."
+              }
+            },
+            "vmSize": {
+              "type": "string",
+              "defaultValue": "Standard_B2s",
+              "metadata": {
+                "description": "VM size."
+              }
+            }
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Network/publicIPAddresses",
+              "apiVersion": "2023-11-01",
+              "name": "[format('pip-bastion-{0}-{1}', parameters('workload'), parameters('suffix'))]",
+              "location": "[parameters('location')]",
+              "sku": {
+                "name": "Standard"
+              },
+              "properties": {
+                "publicIPAllocationMethod": "Static",
+                "publicIPAddressVersion": "IPv4"
+              }
+            },
+            {
+              "type": "Microsoft.Network/bastionHosts",
+              "apiVersion": "2023-11-01",
+              "name": "[format('bas-{0}-{1}', parameters('workload'), parameters('suffix'))]",
+              "location": "[parameters('location')]",
+              "sku": {
+                "name": "Standard"
+              },
+              "properties": {
+                "ipConfigurations": [
+                  {
+                    "name": "IpConf",
+                    "properties": {
+                      "subnet": {
+                        "id": "[parameters('bastionSubnetId')]"
+                      },
+                      "publicIPAddress": {
+                        "id": "[resourceId('Microsoft.Network/publicIPAddresses', format('pip-bastion-{0}-{1}', parameters('workload'), parameters('suffix')))]"
+                      }
+                    }
+                  }
+                ],
+                "enableTunneling": true
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/publicIPAddresses', format('pip-bastion-{0}-{1}', parameters('workload'), parameters('suffix')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Network/networkInterfaces",
+              "apiVersion": "2023-11-01",
+              "name": "[format('nic-jump-{0}', parameters('workload'))]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "ipConfigurations": [
+                  {
+                    "name": "ipconfig1",
+                    "properties": {
+                      "subnet": {
+                        "id": "[parameters('jumpSubnetId')]"
+                      },
+                      "privateIPAllocationMethod": "Dynamic"
+                    }
+                  }
+                ]
+              }
+            },
+            {
+              "type": "Microsoft.Compute/virtualMachines",
+              "apiVersion": "2024-07-01",
+              "name": "[format('vm-jump-{0}', parameters('workload'))]",
+              "location": "[parameters('location')]",
+              "identity": {
+                "type": "SystemAssigned"
+              },
+              "properties": {
+                "hardwareProfile": {
+                  "vmSize": "[parameters('vmSize')]"
+                },
+                "osProfile": {
+                  "computerName": "vm-jump",
+                  "adminUsername": "[parameters('adminUsername')]",
+                  "adminPassword": "[parameters('adminPassword')]",
+                  "windowsConfiguration": {
+                    "enableAutomaticUpdates": true,
+                    "provisionVMAgent": true,
+                    "patchSettings": {
+                      "patchMode": "AutomaticByPlatform"
+                    }
+                  }
+                },
+                "storageProfile": {
+                  "imageReference": {
+                    "publisher": "MicrosoftWindowsServer",
+                    "offer": "WindowsServer",
+                    "sku": "2022-datacenter-azure-edition",
+                    "version": "latest"
+                  },
+                  "osDisk": {
+                    "createOption": "FromImage",
+                    "managedDisk": {
+                      "storageAccountType": "Premium_LRS"
+                    },
+                    "deleteOption": "Delete"
+                  }
+                },
+                "networkProfile": {
+                  "networkInterfaces": [
+                    {
+                      "id": "[resourceId('Microsoft.Network/networkInterfaces', format('nic-jump-{0}', parameters('workload')))]",
+                      "properties": {
+                        "deleteOption": "Delete"
+                      }
+                    }
+                  ]
+                },
+                "securityProfile": {
+                  "securityType": "TrustedLaunch",
+                  "uefiSettings": {
+                    "secureBootEnabled": true,
+                    "vTpmEnabled": true
+                  }
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Network/networkInterfaces', format('nic-jump-{0}', parameters('workload')))]"
+              ]
+            },
+            {
+              "type": "Microsoft.Compute/virtualMachines/extensions",
+              "apiVersion": "2024-07-01",
+              "name": "[format('{0}/{1}', format('vm-jump-{0}', parameters('workload')), 'install-azcli')]",
+              "location": "[parameters('location')]",
+              "properties": {
+                "publisher": "Microsoft.Compute",
+                "type": "CustomScriptExtension",
+                "typeHandlerVersion": "1.10",
+                "autoUpgradeMinorVersion": true,
+                "settings": {
+                  "commandToExecute": "powershell -ExecutionPolicy Bypass -Command \"Invoke-WebRequest -Uri https://aka.ms/installazurecliwindows -OutFile $env:TEMP\\AzureCLI.msi; Start-Process msiexec.exe -Wait -ArgumentList '/I', ($env:TEMP + '\\AzureCLI.msi'), '/quiet'\""
+                }
+              },
+              "dependsOn": [
+                "[resourceId('Microsoft.Compute/virtualMachines', format('vm-jump-{0}', parameters('workload')))]"
+              ]
+            }
+          ],
+          "outputs": {
+            "bastionName": {
+              "type": "string",
+              "value": "[format('bas-{0}-{1}', parameters('workload'), parameters('suffix'))]"
+            },
+            "vmName": {
+              "type": "string",
+              "value": "[format('vm-jump-{0}', parameters('workload'))]"
+            },
+            "vmPrincipalId": {
+              "type": "string",
+              "value": "[reference(resourceId('Microsoft.Compute/virtualMachines', format('vm-jump-{0}', parameters('workload'))), '2024-07-01', 'full').identity.principalId]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'network')]"
+      ]
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "rbac-jump",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "foundryAccountName": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'foundry'), '2025-04-01').outputs.accountName.value]"
+          },
+          "principalId": {
+            "value": "[reference(resourceId('Microsoft.Resources/deployments', 'jumpbox'), '2025-04-01').outputs.vmPrincipalId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.39.26.7824",
+              "templateHash": "8162902724681418473"
+            }
+          },
+          "parameters": {
+            "foundryAccountName": {
+              "type": "string",
+              "metadata": {
+                "description": "Existing Foundry / AI Services account name (parent scope)."
+              }
+            },
+            "principalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Principal id of APIMs system-assigned managed identity."
+              }
+            }
+          },
+          "variables": {
+            "azureAiUserRoleId": "53ca6127-db72-4b80-b1b0-d745d6d5456d"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[format('Microsoft.CognitiveServices/accounts/{0}', parameters('foundryAccountName'))]",
+              "name": "[guid(resourceId('Microsoft.CognitiveServices/accounts', parameters('foundryAccountName')), parameters('principalId'), variables('azureAiUserRoleId'))]",
+              "properties": {
+                "principalId": "[parameters('principalId')]",
+                "principalType": "ServicePrincipal",
+                "roleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', variables('azureAiUserRoleId'))]"
+              }
+            }
+          ]
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Resources/deployments', 'foundry')]",
+        "[resourceId('Microsoft.Resources/deployments', 'jumpbox')]"
+      ]
+    }
+  ],
+  "outputs": {
+    "apimGatewayUrl": {
+      "type": "string",
+      "value": "[format('https://{0}', reference(resourceId('Microsoft.Resources/deployments', 'apim'), '2025-04-01').outputs.apimHostname.value)]"
+    },
+    "botMessagingEndpoint": {
+      "type": "string",
+      "value": "[format('https://{0}/bot/api/messages', reference(resourceId('Microsoft.Resources/deployments', 'apim'), '2025-04-01').outputs.apimHostname.value)]"
+    },
+    "foundryPrivateEndpointId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'foundry-pe'), '2025-04-01').outputs.privateEndpointId.value]"
+    },
+    "jumpboxVmName": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'jumpbox'), '2025-04-01').outputs.vmName.value]"
+    },
+    "bastionName": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Resources/deployments', 'jumpbox'), '2025-04-01').outputs.bastionName.value]"
+    }
+  }
+}

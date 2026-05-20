@@ -1,0 +1,10 @@
+node_modules/
+*.log
+.env
+.vscode/
+*.zip
+.azure/
+*.secret
+*.secrets
+secrets.json
+local.settings.json

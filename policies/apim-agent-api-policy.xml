@@ -1,0 +1,64 @@
+<!--
+  Per-API policy: bot-agent
+  =========================
+  Applied to the "bot-agent" API. Runs AFTER the global validate-jwt has accepted
+  the request. Responsibilities:
+
+    1. Rewrite the inbound /bot/api/messages call into the Foundry agent
+       inference URL (kept here as a single rewrite-uri so you can swap in
+       a richer transform later — e.g. extract the user utterance from the
+       Bot Framework Activity and POST it to the agent's /chat/completions
+       endpoint).
+
+    2. Acquire an AAD access token for Cognitive Services using APIM's
+       system-assigned managed identity (resource =
+       https://cognitiveservices.azure.com/) and forward it as the Bearer
+       to the backend. NO API KEYS in policy or config.
+
+    3. Use the named backend "foundry-private", whose URL is the private
+       Foundry endpoint. Because the VNet has Private DNS linked, the
+       hostname resolves to the Private Endpoint IP — traffic never leaves
+       the VNet.
+
+    4. Add a correlation id for traceability.
+-->
+<policies>
+  <inbound>
+    <base />
+
+    <!-- Tag every request for cross-service correlation in App Insights. -->
+    <set-variable name="correlationId" value="@(Guid.NewGuid().ToString())" />
+    <set-header name="x-correlation-id" exists-action="override">
+      <value>@((string)context.Variables["correlationId"])</value>
+    </set-header>
+
+    <!--
+      Route to the Foundry agent activity-protocol endpoint. Hostname
+      'services.ai.azure.com' is in a Private DNS zone linked to the VNet,
+      so APIM resolves it to the Private Endpoint IP — traffic stays private.
+      We pass the original Bot Framework JWT through (no MSI injection):
+      Foundry authenticates the caller by Bot App ID using that token.
+    -->
+    <set-backend-service base-url="https://aoai-teamsai-6f3kmfw4v4zri.services.ai.azure.com" />
+    <rewrite-uri template="/api/projects/sbodhankar-aveva-demo/agents/weather-agent/endpoint/protocols/activityprotocol?api-version=2025-11-15-preview" />
+  </inbound>
+
+  <backend>
+    <!-- Short, explicit timeout — fail fast instead of holding sockets. -->
+    <forward-request timeout="60" buffer-request-body="true" />
+  </backend>
+
+  <outbound>
+    <base />
+    <set-header name="x-correlation-id" exists-action="override">
+      <value>@((string)context.Variables["correlationId"])</value>
+    </set-header>
+  </outbound>
+
+  <on-error>
+    <base />
+    <set-header name="x-correlation-id" exists-action="override">
+      <value>@((string)context.Variables["correlationId"])</value>
+    </set-header>
+  </on-error>
+</policies>
