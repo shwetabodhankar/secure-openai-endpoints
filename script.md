@@ -273,6 +273,138 @@ az role assignment list --assignee $apimMsi --scope $foundryId -o table
 ```
 You should see one row: `Azure AI User` on the Foundry account, principalType `ServicePrincipal`.
 
+### 4.3 When you DO need per-user identity (the OBO variant)
+
+The shared-gateway model in 4.2 is right for `weather-agent` because weather is the same for everyone. But many real agents need to act **as the signed-in user** — for example:
+
+- "Summarize **my** unread emails" → must call Microsoft Graph as Alice, not as APIM
+- "What's the status of **my** Salesforce opportunities?" → must call Salesforce with Alice's credential
+- "Show me docs **I'm authorized to see**" → SharePoint search must run in Alice's security context
+- Any agent that touches data with row-level / item-level permissions
+
+For these, you swap the gateway-identity pattern for an **On-Behalf-Of (OBO)** flow.
+
+#### How the identity flow changes
+
+```
+ SHARED-AGENT (current):
+   Teams user ──user token──▶ Bot Service ──BF JWT──▶ APIM ──APIM MSI token──▶ Foundry
+                                                                                 │
+                                                            "request from gateway"
+
+ PER-USER (OBO):
+   Teams user ──SSO token──▶ Bot Service ──BF JWT + user assertion──▶ APIM ──┐
+                                                                              │
+                       Foundry / Agent code does OBO exchange ◀───────────────┘
+                       (user assertion → user-scoped token for downstream API)
+                                              │
+                                              ▼
+                                  Microsoft Graph / SharePoint / etc.
+                                  "request from Alice"
+```
+
+#### What you add to the architecture
+
+| Component | Change |
+|---|---|
+| **Teams app manifest** | Already has `webApplicationInfo` — keep it; this is the SSO trigger we discussed earlier |
+| **Bot's Entra app registration** | Add `Expose an API` with `access_as_user` scope; pre-authorize Teams client IDs (`1fec8e78-bce4-4aaf-ab1b-5451cc387264`, `5e3ce6c0-...`) |
+| **Bot code / Foundry agent tool** | Implement OBO: receive the user assertion from the Teams SSO token, exchange it at the Entra `/oauth2/v2.0/token` endpoint for a downstream-API-scoped token, use that token to call Graph/SharePoint/etc. |
+| **Downstream API permissions** | Add **delegated** Graph (or other API) permissions to the bot's app registration (e.g., `Mail.Read`, `Files.Read.All`); grant admin consent |
+| **APIM policy** | Optionally forward the user assertion as a header (e.g., `x-ms-user-assertion`) so the Foundry agent can pick it up |
+| **Foundry RBAC** | Still keep APIM's MSI as `Azure AI User` (for the agent invocation itself); user tokens are for *downstream* APIs the agent calls, not Foundry |
+
+#### What the OBO exchange looks like (pseudo-code)
+```python
+# Inside the Foundry agent's tool implementation
+def read_user_mail(user_assertion: str):
+    # user_assertion = the SSO token Teams gave us, audience = api://botid-<bot-app-id>
+    token_response = requests.post(
+        f"https://login.microsoftonline.com/{tenant_id}/oauth2/v2.0/token",
+        data={
+            "grant_type": "urn:ietf:params:oauth:grant-type:jwt-bearer",
+            "client_id": bot_app_id,
+            "client_secret": bot_app_secret,        # or use MSI federated credential
+            "assertion": user_assertion,
+            "requested_token_use": "on_behalf_of",
+            "scope": "https://graph.microsoft.com/Mail.Read offline_access"
+        }
+    )
+    user_graph_token = token_response.json()["access_token"]
+    # Now call Graph as the user
+    return requests.get(
+        "https://graph.microsoft.com/v1.0/me/messages?$top=10",
+        headers={"Authorization": f"Bearer {user_graph_token}"}
+    ).json()
+```
+
+#### Authorization model comparison
+
+| Concern | Shared-agent (current) | Per-user (OBO) |
+|---|---|---|
+| **Who calls Foundry?** | APIM MSI | APIM MSI (unchanged) |
+| **Who calls downstream APIs?** | N/A — agent has no per-user data | The user, via OBO-exchanged token |
+| **Who controls access?** | Teams admin (who can install) + APIM RBAC | Teams admin + Entra delegated consent + downstream API's own authorization (row-level perms) |
+| **Auditability** | `x-correlation-id` ties Teams user → Foundry call | Downstream API logs show actual user; Foundry logs show APIM; Bot logs show Teams user |
+| **What if the user has no access to the data?** | Agent returns answer anyway (no user-level check) | Downstream API returns 403 — agent surfaces "you don't have access" |
+| **What if user account is disabled?** | Bot still answers (until Entra disables Teams login) | OBO exchange fails immediately on next request |
+| **Required role assignments on Foundry** | 1 (APIM MSI) | 1 (APIM MSI) — same |
+| **Required role/consent on downstream APIs** | None | Per-API delegated permissions + admin/user consent |
+| **Token leakage blast radius** | One MSI → one Foundry role | One user token → that user's full Entra delegated footprint (mailbox, files, etc.) |
+
+#### When to pick which
+
+**Stay with shared-agent (4.2) when:**
+- Agent's data sources are non-personal (weather, public knowledge bases, shared corpora)
+- All Teams users should see identical answers
+- You want the simplest auditing surface
+- Compliance only requires "approved Entra principal called the API"
+
+**Move to OBO (4.3) when:**
+- Agent reads or writes personal data (mail, files, calendar, CRM records owned by the user)
+- Downstream APIs already enforce row/item-level security and you want to honor it
+- Compliance requires "the *user* accessed this data, not a shared service principal"
+- You need to support "what can I see?" semantics correctly
+
+#### What stays the same (the good news)
+- VNet, Private Endpoint, DNS zones — unchanged
+- APIM in External mode, `validate-jwt` policy — unchanged (still validates the Bot Framework JWT)
+- Foundry account configuration — unchanged
+- Bot Service messaging endpoint pointing at APIM — unchanged
+
+OBO is purely an **identity-layer addition**. The network architecture in Sections 2–3 supports both patterns identically.
+
+#### What you'd add to the IaC for OBO
+
+```bicep
+// In the bot's app registration (or via az ad app update)
+// 1. Expose an API
+identifierUris: [ 'api://botid-${botAppId}' ]
+api: {
+  oauth2PermissionScopes: [ {
+    value: 'access_as_user'
+    type: 'User'
+    adminConsentDisplayName: 'Access as user'
+    // ...
+  } ]
+  preAuthorizedApplications: [
+    { appId: '1fec8e78-bce4-4aaf-ab1b-5451cc387264' }  // Teams desktop/mobile
+    { appId: '5e3ce6c0-2b1f-4285-8d4b-75ee78787346' }  // Teams web
+  ]
+}
+
+// 2. Required resource access (delegated Graph)
+requiredResourceAccess: [ {
+  resourceAppId: '00000003-0000-0000-c000-000000000000'  // Microsoft Graph
+  resourceAccess: [
+    { id: '<Mail.Read scope GUID>'; type: 'Scope' }
+    { id: '<offline_access scope GUID>'; type: 'Scope' }
+  ]
+} ]
+```
+
+Plus admin-consent the app registration once tenant-wide, and either store a bot secret in Key Vault **or** use Federated Identity Credentials so the OBO exchange uses APIM/MSI federation instead of a secret.
+
 ---
 
 ## Section 5 — Request lifecycle (end-to-end)
