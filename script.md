@@ -213,6 +213,66 @@ On the **Foundry account** scope:
 - **Defined in:** [infra/modules/rbac.bicep](infra/modules/rbac.bicep) (module is called twice from `main.bicep`)
 - **Idempotency:** role assignment name is `guid(foundry.id, principalId, roleId)` — safe to redeploy.
 
+#### What is APIM's system MSI, really?
+A **system-assigned managed identity** is an Entra ID **service principal** that Azure creates and owns automatically when you enable it on a resource. APIM doesn't store a password or a secret anywhere — when it needs a token, it calls Azure's internal identity endpoint (`http://169.254.169.254/...`) and gets back an Entra access token issued to its own service principal. No secret rotation, no key vault, no credential file. If the APIM resource is deleted, the identity is deleted with it.
+
+In our deployment:
+- **Identity name:** same as the APIM resource (`apim-teamsai-6f3kmfw4v4zri`)
+- **Object ID:** visible in Portal → APIM → **Identity** blade
+- **Type in Entra:** "Managed Identity" (you'll see it in Enterprise applications if you filter by that type)
+
+#### Is APIM calling the agent as itself or as the user?
+**As itself.** This is an important distinction — the architecture deliberately uses **two different identity flows** at two different hops:
+
+```
+ Hop 1 (Teams → APIM):       User identity / Bot Framework token
+ Hop 2 (APIM → Foundry):     APIM's own identity (or the pass-through JWT)
+```
+
+So:
+- **At hop 1** (the public edge), APIM's `validate-jwt` policy verifies a token that represents the **Bot Framework Channel Service speaking for a specific Teams user** in our tenant. The user's identity is encoded in the activity payload (`from.aadObjectId`, `from.id`), and APIM trusts that because the token is signed by `api.botframework.com`.
+- **At hop 2** (the private edge), there's no user token to forward — Foundry's activityprotocol endpoint expects either (a) the same Bot Framework JWT passed through, or (b) an Entra token for `https://cognitiveservices.azure.com` minted on behalf of an Entra principal that has the **Azure AI User** role on the account. **APIM's system MSI is that principal.** When the policy injects an MSI token (or when Foundry accepts the pass-through JWT), the call is authorized as "APIM the gateway" — not as the Teams user.
+
+This is the same pattern as a web app talking to a database: the user authenticates to the app, the app authenticates to the database with its own identity, and the app is responsible for enforcing user-level authorization in its own logic. Foundry doesn't see "user Alice from Teams" — it sees "request from the trusted gateway APIM, who has Azure AI User rights."
+
+#### Why this design (and not user-token pass-through)?
+| Aspect | APIM-as-identity (our design) | User-token pass-through (alternative) |
+|---|---|---|
+| **Token complexity** | One MSI token type, simple to debug | OBO flow with two-leg token exchange, easy to misconfigure |
+| **Foundry RBAC surface** | One role assignment (APIM MSI → Azure AI User) | One role assignment **per user or group** that needs the agent |
+| **Auditability** | Foundry logs show "APIM gateway"; user identity tracked in APIM logs via `x-correlation-id` | Foundry logs show actual user, but admins need Foundry access to see them |
+| **Token lifetime** | MSI token cached by APIM, refreshed automatically | User tokens expire in ~1 hour, refresh handled by the bot |
+| **Scope of compromise** | If APIM is compromised, attacker gets one role on one account | If a user token leaks, attacker gets that user's full Entra footprint |
+| **Best for** | Shared-agent scenarios (one agent, many users) | Per-user data isolation scenarios (e.g., agent reads *your* mailbox) |
+
+For a `weather-agent` that has no user-specific data, the gateway-identity model is the right call: simpler, fewer role assignments to manage, single auditable principal calling Foundry.
+
+#### What "Azure AI User" actually allows
+The role (GUID `53ca6127-db72-4b80-b1b0-d745d6d5456d`) is a built-in Entra role with a narrow set of data-plane permissions on a Cognitive Services / Foundry account:
+- Invoke model endpoints (chat, completions, embeddings)
+- Read/invoke agents, threads, runs
+- Read project metadata
+
+It explicitly **does not** allow:
+- Creating or deleting the account, deployments, or models (that's `Cognitive Services Contributor`)
+- Reading/rotating API keys (that's `Cognitive Services Account Contributor`)
+- Managing private endpoints or networking
+
+So even if APIM's MSI were stolen, the blast radius is "can call agents on this one Foundry account" — they can't pivot to provisioning new models, exfiltrating keys, or changing network rules. That's least-privilege working as intended.
+
+#### How to verify it live
+```powershell
+# Confirm APIM's MSI exists and get its objectId
+az apim show -g rg-teams-ai-secure -n apim-teamsai-6f3kmfw4v4zri `
+  --query "identity" -o json
+
+# Confirm the role assignment on the Foundry account
+$apimMsi = az apim show -g rg-teams-ai-secure -n apim-teamsai-6f3kmfw4v4zri --query identity.principalId -o tsv
+$foundryId = az cognitiveservices account show -g rg-teams-ai-secure -n aoai-teamsai-6f3kmfw4v4zri --query id -o tsv
+az role assignment list --assignee $apimMsi --scope $foundryId -o table
+```
+You should see one row: `Azure AI User` on the Foundry account, principalType `ServicePrincipal`.
+
 ---
 
 ## Section 5 — Request lifecycle (end-to-end)
